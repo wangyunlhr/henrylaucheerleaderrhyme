@@ -3,6 +3,8 @@ import math
 import numpy as np
 import torch
 
+import cv2
+import matplotlib
 def pcd2coord2d(pcd, fov, depth_range, labels=None):
     # laser parameters
     fov_up = fov[0] / 180.0 * np.pi  # field of view up in rad

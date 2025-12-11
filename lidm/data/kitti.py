@@ -10,8 +10,8 @@ from lidm.data.base import DatasetBase
 from .annotated_dataset import Annotated3DObjectsDataset
 from .conditional_builder.utils import corners_3d_to_2d
 from .helper_types import Annotation
-from ..utils.lidar_utils import pcd2range, pcd2coord2d, range2pcd, kitti_points_to_range_image
-
+from ..utils.lidar_utils import pcd2range, pcd2coord2d, range2pcd, kitti_points_to_range_image, color_mapping
+import imageio
 import torch
 import h5py
 import torch.nn.functional as F
@@ -37,7 +37,7 @@ CAM_KITTI360_TRAIN_SET = ['00', '04', '05', '06', '07', '08', '09', '10']  # cam
 # validation
 SEM_KITTI_VAL_SET = KITTI_VAL_SET = ['08']
 CAM_KITTI360_VAL_SET = KITTI360_VAL_SET = ['03']
-
+colormap_ = 20
 
 class KITTIBase(DatasetBase):
     def __init__(self, **kwargs):
@@ -73,7 +73,22 @@ class KITTIBase(DatasetBase):
             example[self.condition_key] = sem_map
         else:
             proj_range, _ = pcd2range(sweep, self.img_size, self.fov, self.depth_range)
-        check_range_image = kitti_points_to_range_image(sweep, np.ones_like(sweep))
+        
+        #! 检查range image
+        # check_range_image = kitti_points_to_range_image(sweep, np.ones_like(sweep))
+        # lidm_range_image = (
+        #     color_mapping(proj_range, colormap_) * 255
+        # ).astype(np.uint8)
+        # os.makedirs('./scale_vis', exist_ok=True)
+        # image_path = f'./scale_vis/{idx:4d}_lidm.jpg'
+        # imageio.imwrite(image_path, lidm_range_image)
+        # lidarrt_vis = (
+        #     color_mapping(check_range_image[:,:,0], colormap_) * 255
+        # ).astype(np.uint8)
+        # image_path = f'./scale_vis/{idx:4d}_generate_range_image.jpg'
+        # imageio.imwrite(image_path, lidarrt_vis)
+
+
         proj_range, proj_mask = self.process_scan(proj_range)
         example['image'], example['mask'] = proj_range, proj_mask
         if self.return_pcd:
@@ -857,7 +872,7 @@ class HDF5Dataset_kitti(torch.utils.data.Dataset):
         t3 = torch.cat([t2, drop_prior], dim=0)                    # [3,H,W]
 
         # 宽度边缘裁掉
-        t3 = self._crop_w_edges(t3, px=self.crop_w_px, both=self.crop_w_both)       # [3,H,Wc]
+        # t3 = self._crop_w_edges(t3, px=self.crop_w_px, both=self.crop_w_both)       # [3,H,Wc]
         return t3
 
     def _load_target_3ch(self, path_hw3):
@@ -872,26 +887,23 @@ class HDF5Dataset_kitti(torch.utils.data.Dataset):
             raise ValueError(f"Expect HxWx3 npy, got {arr.shape}")
 
         t3 = self._to_chw_float32(arr)                        # [3,h,w]
-
+        t3 = t3[:, 1:-1, 3:-3]
         t01 = self._norm_2ch_to_m11(t3[:2])                   # [2,H,W]
         t2  = t3[2:3]                                         # [1,H,W] 保持原样
         out = torch.cat([t01, t2], dim=0)                     # [3,H,W]
-        out = self._crop_w_edges(out, px=self.crop_w_px, both=self.crop_w_both)      # [3,H,Wc]
+        # out = self._crop_w_edges(out, px=self.crop_w_px, both=self.crop_w_both)      # [3,H,Wc]
         #! resize到指定大小
-        t3_resize = self._resize_chw(t3[:2], self.H, self.W, 'bilinear', False)   # [3,H,W]
+        # t3_resize = self._resize_chw(t3[:2], self.H, self.W, 'bilinear', False)   # [3,H,W]
 
         # 只对 d/i 做 [-1,1]
-        t01_resize = self._norm_2ch_to_m11(t3_resize[:2])                   # [2,H,W]
-        t2_resize  = self._resize_chw(t3[2:3], self.H, self.W, mode='nearest')                                         # [1,H,W] 保持原样
-        out_resize = torch.cat([t01_resize, t2_resize], dim=0)                     # [3,H,W]
+        # t01_resize = self._norm_2ch_to_m11(t3_resize[:2])                   # [2,H,W]
+        # t2_resize  = self._resize_chw(t3[2:3], self.H, self.W, mode='nearest')                                         # [1,H,W] 保持原样
+        # out_resize = torch.cat([t01_resize, t2_resize], dim=0)                     # [3,H,W]
 
-        # 宽度边缘裁掉
-        out_resize = self._crop_w_edges(out_resize, px=self.crop_w_px, both=self.crop_w_both)      # [3,H,Wc]
+        # # 宽度边缘裁掉
+        # out_resize = self._crop_w_edges(out_resize, px=self.crop_w_px, both=self.crop_w_both)      # [3,H,Wc]
 
-
-
-        
-        return out_resize, out
+        return out, out
 
 
     def __getitem__(self, index_):
