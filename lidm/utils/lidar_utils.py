@@ -205,6 +205,113 @@ def range2pcd(range_img, fov, depth_range, depth_scale, log_scale=True, label=No
     return pcd, color, label
 
 
+def range2point_kitticropped(
+    range_map,                 # cropped: (64, 1024) or (1,64,1024) or (64,1024,1)
+    ir,
+    sensor_center,
+    sensor2world,
+    pixel_offset = 0.0,
+    angle_offset = 0.0,
+    H0=66, W0=1030,            # original size before crop
+    crop_top=1, crop_bottom=1,
+    crop_left=3, crop_right=3,
+):
+    """
+    Convert cropped range image to point cloud in world coordinates.
+    Cropping is assumed to be symmetric edge-crop from original (H0,W0).
+
+    Returns:
+        points: (Hc, Wc, 3) world coordinates
+    """
+    ir = ir
+    sensor_center = sensor_center
+    sensor2world = sensor2world
+    pixel_offset = pixel_offset
+    angle_offset = angle_offset
+
+    # ---- to tensor + shape normalize ----
+    if not torch.is_tensor(range_map):
+        range_map = torch.tensor(range_map, dtype=torch.float32, device="cuda")
+    else:
+        range_map = range_map.to(device="cuda", dtype=torch.float32)
+
+    if range_map.dim() != 2:
+        if range_map.dim() == 3:
+            if range_map.shape[0] == 1:
+                range_map = range_map[0]
+            elif range_map.shape[2] == 1:
+                range_map = range_map[..., 0]
+            else:
+                raise ValueError("range_map is not (H, W, 1) or (1, H, W)")
+        else:
+            raise ValueError(f"range_map shape unindentified: {range_map.shape}")
+
+    Hc, Wc = range_map.shape
+    if Hc != (H0 - crop_top - crop_bottom) or Wc != (W0 - crop_left - crop_right):
+        raise ValueError(
+            f"Cropped shape mismatch: got {(Hc, Wc)}, "
+            f"expected {(H0 - crop_top - crop_bottom, W0 - crop_left - crop_right)}"
+        )
+
+    if not torch.is_tensor(sensor_center):
+        sensor_center = torch.tensor(sensor_center, dtype=torch.float32, device="cuda")
+    else:
+        sensor_center = sensor_center.to(device="cuda", dtype=torch.float32)
+
+    if not torch.is_tensor(sensor2world):
+        sensor2world = torch.tensor(sensor2world, dtype=torch.float32, device="cuda")
+    else:
+        sensor2world = sensor2world.to(device="cuda", dtype=torch.float32)
+
+    # ---- rays origin ----
+    rays_o = sensor_center[None, None, :].expand(Hc, Wc, 3)
+
+    # ---- build azimuth from ORIGINAL W0 then crop columns ----
+    # Keep your original convention: arange(W,0,-1)
+    xs_full = torch.arange(W0, 0, -1, device="cuda", dtype=torch.float32)  # (W0,)
+    xs = xs_full[crop_left: W0 - crop_right]                               # (Wc,)
+    x = (xs - pixel_offset) / float(W0)                                # normalize by W0
+    azimuth = x * 2.0 * torch.pi - torch.pi - angle_offset             # (Wc,)
+
+    # ---- build inclination from ORIGINAL H0 then crop rows ----
+    if type(ir) != list and type(ir) != tuple:
+        ir = [-ir, ir]
+
+    if len(ir) == 2:
+        ys_full = torch.arange(H0, 0, -1, device="cuda", dtype=torch.float32)  # (H0,)
+        ys = ys_full[crop_top: H0 - crop_bottom]                               # (Hc,)
+        y = (ys - pixel_offset) / float(H0)                                # normalize by H0
+        inclination = y * (ir[1] - ir[0]) + ir[0]                               # (Hc,)
+    else:
+        # ir is per-beam inclinations list/array length H0
+        inc_full = torch.tensor(ir, device="cuda", dtype=torch.float32).flip(0)  # (H0,)
+        inc = inc_full[crop_top: H0 - crop_bottom]                                # (Hc,)
+        inclination = inc  # (Hc,)
+
+    # ---- mesh to (Hc, Wc) ----
+    # torch.meshgrid default indexing may differ across versions; make it explicit
+    grid_incl, grid_az = torch.meshgrid(inclination, azimuth, indexing="ij")  # (Hc,Wc)
+
+    rays_x = torch.cos(grid_incl) * torch.cos(grid_az)
+    rays_y = torch.cos(grid_incl) * torch.sin(grid_az)
+    rays_z = torch.sin(grid_incl)
+
+    rays_d = torch.stack([rays_x, rays_y, rays_z], dim=-1)  # (Hc,Wc,3)
+    rays_d = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)
+
+    # ---- range -> sensor points ----
+    points = rays_d * range_map[..., None]
+
+    # ---- sensor -> world ----
+    # R = sensor2world[:3, :3]
+    # t = sensor2world[:3, 3]
+    # points = points @ R.T + t
+
+    return points #!返回sensor坐标系的点云
+
+
+
+
 def range2xyz(range_img, fov, depth_range, depth_scale, log_scale=True, **kwargs):
     # laser parameters
     size = range_img.shape

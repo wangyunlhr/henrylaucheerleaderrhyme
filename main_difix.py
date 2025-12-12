@@ -19,7 +19,7 @@ from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
 from lidm.data.base import Txt2ImgIterableBaseDataset
-from lidm.utils.lidar_utils import range2pcd
+from lidm.utils.lidar_utils import range2pcd, range2point_kitticropped
 from lidm.utils.misc_utils import instantiate_from_config, isdepth
 
 # remove annoying user warnings
@@ -29,6 +29,8 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 warnings.filterwarnings("ignore", category=LightningDeprecationWarning)
 #! 
 from lidm.data.kitti import HDF5Dataset, HDF5Dataset_kitti
+import math
+import open3d as o3d
 
 def get_parser(**parser_kwargs):
     def str2bool(v):
@@ -333,7 +335,7 @@ class ImageLogger(Callback):
 
     @rank_zero_only
     def log_local(self, save_dir, split, images,
-                  global_step, current_epoch, batch_idx):
+                  global_step, current_epoch, batch_idx, batch):
         root = os.path.join(save_dir, "images", split)
         for k in images:
             # image grids
@@ -353,14 +355,33 @@ class ImageLogger(Callback):
             # save a batch of point clouds
             imgs = images[k].squeeze().detach().cpu().numpy()
             if isdepth(imgs):
-                for i, img in enumerate(imgs[:2]):
+                for i, img in enumerate(imgs[:2]): #!修改成对应参数的可视化点云，因为图像进行了边缘裁剪，所以要修改一下
                     img = (img + 1.) / 2.
-                    xyz, _, _ = range2pcd(img, **self.dataset_kwargs)
-                    pcd_name = "{}_pcd_{:02}_gs-{:06}_e-{:06}_b-{:06}.txt".format(k, i, global_step, current_epoch, batch_idx)
+                    #! 将归一化的数据恢复到原始的尺度
+                    img = img * 80.0
+                    sensor_center = batch['sensor_center'][i]
+                    sensor2world = batch['sensor2world'][i]
+                    ir =  (math.radians(-24.9), math.radians(2.0))
+                    point_sensor = range2point_kitticropped(
+                                                            img,                 # cropped: (64, 1024) or (1,64,1024) or (64,1024,1)
+                                                            ir,
+                                                            sensor_center,
+                                                            sensor2world,
+                                                        )
+                    mask = (img != 0) 
+                    point_sensor = point_sensor[mask].cpu()
+                    point = o3d.geometry.PointCloud()
+                    point.points = o3d.utility.Vector3dVector(point_sensor)
+                    pcd_name = "{}_pcd_{:02}_gs-{:06}_e-{:06}_b-{:06}.ply".format(k, i, global_step, current_epoch, batch_idx)
                     pcd_path = os.path.join(root, pcd_name)
-                    np.savetxt(pcd_path, xyz, fmt='%.6f')
+                    o3d.io.write_point_cloud(pcd_path, point)
+                    # xyz, _, _ = range2pcd(img, **self.dataset_kwargs)
+                    # pcd_name = "{}_pcd_{:02}_gs-{:06}_e-{:06}_b-{:06}.txt".format(k, i, global_step, current_epoch, batch_idx)
+                    # pcd_path = os.path.join(root, pcd_name)
+                    # np.savetxt(pcd_path, xyz, fmt='%.6f')
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
+        # print('='*10, 'image_logger_log_img')
         check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
         if (self.check_frequency(check_idx, split) and  # batch_idx % self.batch_freq == 0
                 hasattr(pl_module, "log_images") and
@@ -384,7 +405,7 @@ class ImageLogger(Callback):
                         images[k] = torch.clamp(images[k], -1., 1.)
 
             self.log_local(pl_module.logger.save_dir, split, images,
-                           pl_module.global_step, pl_module.current_epoch, batch_idx)
+                           pl_module.global_step, pl_module.current_epoch, batch_idx, batch)
 
             logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
             logger_log_images(pl_module, images, pl_module.global_step, split)
@@ -405,10 +426,12 @@ class ImageLogger(Callback):
         return False
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        # print("*"*10, "image_logger_trainbatch_end", batch_idx, "global_step", pl_module.global_step)
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        # print("*"*10, "image_logger_testbatch_end", batch_idx, "global_step", pl_module.global_step)
         if not self.disabled and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="val")
         if hasattr(pl_module, 'calibrate_grad_norm'):
@@ -676,7 +699,7 @@ if __name__ == "__main__":
         # add callback which sets up log directory
         default_callbacks_cfg = {
             "setup_callback": {
-                "target": "main.SetupCallback",
+                "target": "main_difix.SetupCallback",
                 "params": {
                     "resume": opt.resume,
                     "now": now,
@@ -688,7 +711,7 @@ if __name__ == "__main__":
                 }
             },
             "image_logger": {
-                "target": "main.ImageLogger",
+                "target": "main_difix.ImageLogger",
                 "params": {
                     "batch_frequency": 750,
                     "max_images": 4,
@@ -697,14 +720,14 @@ if __name__ == "__main__":
                 }
             },
             "learning_rate_logger": {
-                "target": "main.LearningRateMonitor",
+                "target": "main_difix.LearningRateMonitor",
                 "params": {
                     "logging_interval": "step",
                     # "log_momentum": True
                 }
             },
             "cuda_callback": {
-                "target": "main.CUDACallback"
+                "target": "main_difix.CUDACallback"
             },
         }
         if version.parse(pl.__version__) >= version.parse('1.4.0'):

@@ -653,7 +653,7 @@ class LatentDiffusion(DDPM):
 
     @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
-                  cond_key=None, return_original_cond=False, bs=None):
+                  cond_key=None, return_original_cond=False, return_xcrec=False, bs=None):
         # ground truth
         # import pdb; pdb.set_trace()
         x = super().get_input(batch, k)
@@ -676,6 +676,10 @@ class LatentDiffusion(DDPM):
                     xc = super().get_input(batch, cond_key).to(self.device) #! xc是原始分辨率的condition
             else:
                 xc = x
+
+        #! 如果x截断的话，xc也要截断
+        if bs is not None:
+            xc = xc[:bs]
             # if bs is not None:
             #     xc = xc[:bs]
         #     if not self.cond_stage_trainable or force_c_encode:
@@ -700,6 +704,7 @@ class LatentDiffusion(DDPM):
         #         pos_x, pos_y = self.compute_latent_shifts(batch)
         #         c = {'pos_x': pos_x, 'pos_y': pos_y}
         #! 这里面对condtion 进行vae编码
+        xc = xc.to(self.device)
         encoder_xc = self.encode_first_stage(xc)
         c = self.get_first_stage_encoding(encoder_xc).detach()
         out = [z, c]
@@ -708,7 +713,7 @@ class LatentDiffusion(DDPM):
             out.extend([x, xrec])
         if return_original_cond:
             out.append(xc)
-        if False:
+        if return_xcrec:
             xcrec = self.decode_first_stage(c)
             out.append(xcrec)
         #! 额外返回 condition经过vae编码再解码的结果
@@ -1265,16 +1270,18 @@ class LatentDiffusion(DDPM):
         use_ddim = ddim_steps is not None
 
         log = dict()
-        z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
+        z, c, x, xrec, xc, xc_rec = self.get_input(batch, self.first_stage_key,
                                            return_first_stage_outputs=True,
                                            force_c_encode=True,
                                            return_original_cond=True,
+                                           return_xcrec = True,
                                            bs=N)
         # [z, c, x, xrec, xc] 前两项是低分辨率的 xrec是直接通过vae解码得到的高分辨率图像
         N = min(x.shape[0], N)
         n_row = min(x.shape[0], n_row)
         log["inputs"] = x
         log["reconstruction"] = xrec #!这个是验证vae的结果
+        log['xc_rec'] = xc_rec
         if self.model.conditioning_key is not None:
             if hasattr(self.cond_stage_model, "decode"):
                 xc = self.cond_stage_model.decode(c)
@@ -1420,6 +1427,7 @@ class DiffusionWrapper(pl.LightningModule):
         if self.conditioning_key is None:
             out = self.diffusion_model(x, t)
         elif self.conditioning_key == 'concat':
+            assert x.shape == c_concat[0].shape
             xc = torch.cat([x] + c_concat, dim=1)
             out = self.diffusion_model(xc, t)
         elif self.conditioning_key == 'crossattn':
