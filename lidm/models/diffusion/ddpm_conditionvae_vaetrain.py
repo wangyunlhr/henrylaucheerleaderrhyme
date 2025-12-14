@@ -651,7 +651,7 @@ class LatentDiffusion(DDPM):
 
         return fold, unfold, normalization, weighting
 
-    @torch.no_grad()
+    # @torch.no_grad() #!注意输入
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, return_xcrec=False, bs=None):
         # ground truth
@@ -838,7 +838,7 @@ class LatentDiffusion(DDPM):
             else:
                 return self.first_stage_model.decode(z)
 
-    @torch.no_grad()
+    # @torch.no_grad() #!训练vae encoder
     def encode_first_stage(self, x):
         if hasattr(self, "split_input_params"):
             if self.split_input_params["patch_distributed_vq"]:
