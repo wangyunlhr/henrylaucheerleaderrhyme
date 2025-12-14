@@ -419,6 +419,33 @@ class DDPM(pl.LightningModule):
         return opt
 
 
+def _param_delta_norm(module: torch.nn.Module, snap: dict):
+    """对比 module 当前参数 与 snap 里的参数，返回(是否变化, delta_norm, param_norm)"""
+    deltas = []
+    pnorms = []
+    for n, p in module.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.data is None:
+            continue
+        key = f"{id(module)}::{n}"
+        if key not in snap:
+            continue
+        before = snap[key]
+        after = p.data
+        d = (after - before).detach()
+        deltas.append(d.norm())
+        pnorms.append(after.detach().norm())
+
+    if len(deltas) == 0:
+        return False, None, None
+    delta_norm = torch.norm(torch.stack(deltas)).item()
+    param_norm = torch.norm(torch.stack(pnorms)).item()
+    changed = delta_norm > 0.0
+    return changed, delta_norm, param_norm
+
+
+
 class LatentDiffusion(DDPM):
     """main class"""
 
@@ -891,6 +918,90 @@ class LatentDiffusion(DDPM):
         #         tc = self.cond_ids[t].to(self.device)
         #         c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
         return self.p_losses(x, c, t, *args, **kwargs)
+
+    def _has_grad(self, module: torch.nn.Module):
+        grads = []
+        for p in module.parameters():
+            if not p.requires_grad:
+                continue
+            if p.grad is not None:
+                grads.append(p.grad.detach())
+        if len(grads) == 0:
+            return False, None
+        # 给个简单量级指标
+        gnorm = torch.norm(torch.stack([g.norm() for g in grads])).item()
+        return True, gnorm
+
+    def print_trainable_params(self, m, name):
+        ps = [(n,p) for n,p in m.named_parameters() if p.requires_grad]
+        print(f"\n[{name}] trainable param count = {len(ps)}")
+        for n,p in ps:
+            print(f"  {name}.{n}: {tuple(p.shape)}")
+
+    # @rank_zero_only
+    # def on_after_backward(self): #! backward 后打印各模块是否产生梯度与梯度范数，用来确认本 step 是否对这些模块有反传信号
+    #     checks = [
+    #         ("fs.encoder", self.first_stage_model.encoder),
+    #         ("fs.decoder", self.first_stage_model.decoder),
+    #         ("fs.quant_conv", self.first_stage_model.quant_conv),
+    #         ("fs.post_quant_conv", self.first_stage_model.post_quant_conv),
+    #         ("fs.quantize", self.first_stage_model.quantize),
+    #     ]
+
+    #     msg_parts = []
+    #     for name, m in checks:
+    #         has, gnorm = self._has_grad(m)
+    #         msg_parts.append(f"{name}: has_grad={has}, gnorm={gnorm}")
+    #     print(" | ".join(msg_parts))
+
+
+
+    def _get_checks(self):
+        fs = getattr(self, "first_stage_model", None)
+        if fs is None: return []
+        out = []
+        if hasattr(fs, "encoder"): out.append(("fs.encoder", fs.encoder))
+        if hasattr(fs, "decoder"): out.append(("fs.decoder", fs.decoder))
+        if hasattr(fs, "quant_conv"): out.append(("fs.quant_conv", fs.quant_conv))
+        if hasattr(fs, "post_quant_conv"): out.append(("fs.post_quant_conv", fs.post_quant_conv))
+        if hasattr(fs, "quantize"): out.append(("fs.quantize", fs.quantize))
+        return out
+
+    def _snapshot_params(self, module, snap: dict):
+        for n, p in module.named_parameters():
+            if not p.requires_grad:
+                continue
+            snap[f"{id(module)}::{n}"] = p.data.detach().clone()
+
+    # @rank_zero_only
+    # def optimizer_step(
+    #     self,
+    #     epoch,
+    #     batch_idx,
+    #     optimizer,
+    #     optimizer_idx,
+    #     optimizer_closure,
+    #     on_tpu=False,
+    #     using_native_amp=False,
+    #     using_lbfgs=False,
+    # ):
+    #     # ===== step 前快照（梯度已算好，但参数还没更新）=====
+    #     snap = {}
+    #     for name, m in self._get_checks():
+    #         self._snapshot_params(m, snap)
+
+    #     # ===== 真正执行 step（包含 closure/backward 等）=====
+    #     optimizer.step(closure=optimizer_closure)
+
+    #     # ===== step 后对比（参数应已更新）=====
+    #     parts = []
+    #     for name, m in self._get_checks():
+    #         changed, dnorm, pnorm = _param_delta_norm(m, snap)
+    #         parts.append(f"{name}: changed={changed}, Δ={dnorm}, |w|={pnorm}")
+    #     print(" | ".join(parts))
+
+    #     optimizer.zero_grad()
+
 
     def _rescale_annotations(self, bboxes, crop_coordinates):  # TODO: move to dataset
         def rescale_bbox(bbox):
