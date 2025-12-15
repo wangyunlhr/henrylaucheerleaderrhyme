@@ -33,7 +33,7 @@ DATASET2METRICS = {'kitti': ['frid', 'fsvd', 'fpvd', 'cd', 'emd'], 'nuscenes': [
 DATASET2TYPE = {'kitti': '64', 'nuscenes': '32'}
 
 custom_to_range = lambda x: (x * 255.).clamp(0, 255).floor() / 255.
-
+#! 检查原版vae 在kitti数据集上的，重建的depth指标
 
 def custom_to_pcd(x, config, rgb=None):
     x = x.squeeze().detach().cpu().numpy()
@@ -246,7 +246,7 @@ if __name__ == "__main__":
         logdir = opt.resume.rstrip("/")
         ckpt = os.path.join(logdir, "model.ckpt")
 
-    base_configs = [f'{logdir}/config.yaml']
+    base_configs = [f'{logdir}/config.yaml'] #!修改成对应的 LiDAR-Diffusion-main/models/first_stage_models/kitti/f_c2_p4/autoencoder_c2_p4.yaml
     opt.base = base_configs
 
     configs = [OmegaConf.load(cfg) for cfg in opt.base]
