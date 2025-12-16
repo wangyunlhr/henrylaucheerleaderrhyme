@@ -1421,7 +1421,7 @@ class LatentDiffusion(DDPM):
                 log["original_conditioning"] = label2rgb[xc.argmax(1)].permute(0, 3, 1, 2) #! seg的label换成颜色B,C=3,H,W
 
         if plot_diffusion_rows:
-            # get diffusion row
+            # get diffusion row #!添加噪声的可视化结果
             diffusion_row = list()
             z_start = z[:n_row]
             for t in range(self.num_timesteps):
@@ -1442,12 +1442,16 @@ class LatentDiffusion(DDPM):
             # get denoise row
             with self.ema_scope("Plotting"):
                 samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
-                                                         ddim_steps=ddim_steps, eta=ddim_eta)
+                                                         ddim_steps=ddim_steps, eta=ddim_eta, log_every_t = self.log_every_t)
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
             if plot_denoise_rows:
-                denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
-                log["denoise_row"] = denoise_grid
+                # intermediates['x_inter'].append(img)
+                # intermediates['pred_x0'].append(pred_x0)
+                denoise_grid_x_inter = self._get_denoise_row_from_list(z_denoise_row['x_inter'])
+                log["denoise_row_x_inter"] = denoise_grid_x_inter
+                denoise_grid_pred_x0 = self._get_denoise_row_from_list(z_denoise_row['pred_x0'])
+                log["denoise_row_pred_x0"] = denoise_grid_pred_x0
 
             if quantize_denoised and not isinstance(self.first_stage_model, AutoencoderKL) and not isinstance(
                     self.first_stage_model, IdentityFirstStage):
@@ -1455,7 +1459,7 @@ class LatentDiffusion(DDPM):
                 with self.ema_scope("Plotting Quantized Denoised"):
                     samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
                                                              ddim_steps=ddim_steps, eta=ddim_eta,
-                                                             quantize_denoised=True)
+                                                             quantize_denoised=True) #! 每次vae——feature都进行一次量化
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_x0_quantized"] = x_samples
 

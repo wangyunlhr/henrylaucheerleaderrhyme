@@ -16,12 +16,14 @@ from PIL import Image
 
 from lidm.utils.misc_utils import instantiate_from_config, set_seed
 from lidm.utils.lidar_utils import range2pcd
-from lidm.eval.eval_utils import evaluate
+from lidm.eval.eval_utils import evaluate, evaluate_range_image_vae
 
 # remove annoying user warnings
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+from torch.utils.data import Subset
+import open3d as o3d
 
 try:
     import open3d as o3d
@@ -45,6 +47,12 @@ def custom_to_pcd(x, config, rgb=None):
     xyz, rgb, _ = range2pcd(x, color=rgb, **config['data']['params']['dataset'])
 
     return xyz, rgb
+
+def recover_depth(x, max_depth = None):
+    x = x.squeeze().detach().cpu().numpy()
+    x = (np.clip(x, -1., 1.) + 1.) / 2.
+    x = (x * max_depth)
+    return x 
 
 
 def custom_to_pil(x):
@@ -88,32 +96,50 @@ def run(model, dataloader, imglogdir, pcdlogdir, nplog=None, config=None, verbos
     n_saved = len(glob.glob(os.path.join(imglogdir, '*.png')))
 
     all_samples, all_gt = [], []
+    all_range_images, all_gt_ranges, all_gt_masks = [], [], []
     print(f"Running conditional sampling")
     for batch in tqdm(dataloader, desc="Reconstructing Batches"):
-        all_gt.extend(batch['reproj'])
+        all_gt.extend(batch['reproj']) #这个是rangeimage对应的点云
         N = len(batch['reproj'])
         logs = model.log_images(batch)
-        n_saved = save_logs(logs, imglogdir, pcdlogdir, N, n_saved=n_saved, config=config)
+        n_saved = save_logs(batch,logs, imglogdir, pcdlogdir, N, n_saved=n_saved, config=config)
         all_samples.extend([custom_to_pcd(img, config)[0].astype(np.float32) for img in logs["reconstructions"]])
+        all_range_images.extend(recover_depth(img, max_depth = config['data']['params']['dataset']['depth_scale']) for img in logs['reconstructions'])
+        all_gt_ranges.extend(recover_depth(img, max_depth = config['data']['params']['dataset']['depth_scale']) for img in logs['inputs'])
+        all_gt_masks.extend(img.cpu().numpy() for img in logs['mask'])
     joblib.dump(all_samples, os.path.join(nplog, f"samples.pcd"))
 
     print(f"Sampling of {n_saved} images finished in {(time.time() - tstart) / 60.:.2f} minutes.")
-    return all_samples, all_gt
+    return all_samples, all_gt, all_range_images, all_gt_ranges, all_gt_masks
 
 
-def save_logs(logs, imglogdir, pcdlogdir, num, n_saved=0, key_list=None, config=None):
+def save_logs(batch, logs, imglogdir, pcdlogdir, num, n_saved=0, key_list=None, config=None):
     key_list = logs.keys() if key_list is None else key_list
     for i in range(num):
+        seq = batch.get("seq", [None]*num)[i]
+        ts  = batch.get("timestep", batch.get("timestamps", [None]*num))[i]  # 兼容 timestamps/timestep
+
+        seq_str = str(seq) if seq is not None else "NA"
+        ts_str  = str(ts)  if ts  is not None else f"{n_saved:06d}"
+
+        #seq + timestep
+        base = f"{seq_str}_{ts_str}"
         for k in key_list:
+            if k == 'mask':
+                continue
             x = logs[k][i]
             # save as image
             img = custom_to_pil(x)
-            imgpath = os.path.join(imglogdir, f"{k}_{n_saved:06}.png")
+            imgpath = os.path.join(imglogdir, f"{k}_{base}.png")
             img.save(imgpath)
             # save as point cloud
             xyz, rgb = custom_to_pcd(x, config)
-            pcdpath = os.path.join(pcdlogdir, f"{k}_{n_saved:06}.txt")
-            np.savetxt(pcdpath, np.hstack([xyz, rgb]), fmt='%.3f')
+            # pcdpath = os.path.join(pcdlogdir, f"{k}_{n_saved:06}.txt")
+            # np.savetxt(pcdpath, np.hstack([xyz, rgb]), fmt='%.3f')
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(xyz.astype(np.float64))
+            plypath = os.path.join(pcdlogdir, f"{k}_{base}.ply")
+            o3d.io.write_point_cloud(plypath, pcd)
         n_saved += 1
     return n_saved
 
@@ -201,7 +227,7 @@ def test_collate_fn(data):
     keys = data[0].keys()
     for k in keys:
         v = [d[k] for d in data]
-        if k not in ['reproj', 'raw']:
+        if k not in ['reproj', 'raw', 'seq', 'timestep', 'data_path']:
             v = torch.from_numpy(np.stack(v, 0))
         else:
             v = [d[k] for d in data]
@@ -291,12 +317,16 @@ if __name__ == "__main__":
         data_config = config['data']['params']['validation']
         data_config['params'].update({'dataset_config': config['data']['params']['dataset'],
                                       'aug_config': config['data']['params']['aug'], 'return_pcd': True})
+        #! 添加使用lidarrt的kittival
+        data_config['params'].update({'use_lidart_val': True})
+
         dataset = instantiate_from_config(data_config)
+        # dataset = Subset(dataset, list(range(min(64, len(dataset))))) #! debug only
         dataloader = DataLoader(dataset, batch_size=opt.batch_size, num_workers=8, shuffle=False, drop_last=False,
                                 collate_fn=test_collate_fn)
 
         # settings
-        all_samples, all_gt = run(model, dataloader, imglogdir, pcdlogdir, nplog=numpylogdir,
+        all_samples, all_gt, all_range_images, all_gt_ranges, all_gt_masks = run(model, dataloader, imglogdir, pcdlogdir, nplog=numpylogdir,
                                   config=config, verbose=opt.verbose)
 
         # recycle gpu memory
@@ -320,4 +350,5 @@ if __name__ == "__main__":
 
     # evaluation
     metrics, data_type = DATASET2METRICS[opt.dataset], DATASET2TYPE[opt.dataset]
-    evaluate(all_gt, all_samples, metrics, data_type)
+    # evaluate(all_gt, all_samples, metrics, data_type)
+    evaluate_range_image_vae(all_gt_ranges, all_range_images, all_gt_masks)

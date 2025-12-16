@@ -55,7 +55,90 @@ def evaluate_range_image(gt_range_maps_list, sample_range_images_list, sample_gt
     for gt_range_map, sample_range_image, sample_gt_mask in tqdm(zip(gt_range_maps_list, sample_range_images_list, sample_gt_masks_list), total=len(gt_range_maps_list)):
         # apply mask
         gt_depth = (gt_range_map * sample_gt_mask).transpose(1, 2, 0)
-        pred_depth = (sample_range_image[None] * sample_gt_mask).transpose(1, 2, 0)
+        if len(sample_range_image.shape) == 2:
+            sample_range_image = sample_range_image[:, :, None]
+        pred_depth = (sample_range_image * sample_gt_mask).transpose(1, 2, 0)
+
+        rmse, mae, medae, lpips_loss, ssim_loss, psnr_loss = compute_depth_metrics(
+            gt_depth, pred_depth
+        )
+        rmse_list.append(rmse)
+        mae_list.append(mae)
+        medae_list.append(medae)
+        lpips_list.append(lpips_loss)
+        ssim_list.append(ssim_loss)
+        psnr_list.append(psnr_loss)
+
+    print(OUTPUT_TEMPLATE.format('RMSE', np.mean(rmse_list)))
+    print(OUTPUT_TEMPLATE.format('MAE ', np.mean(mae_list)))
+    print(OUTPUT_TEMPLATE.format('MedAE', np.mean(medae_list)))
+    print(OUTPUT_TEMPLATE.format('LPIPS', np.mean(lpips_list)))
+    print(OUTPUT_TEMPLATE.format('SSIM ', np.mean(ssim_list)))
+    print(OUTPUT_TEMPLATE.format('PSNR ', np.mean(psnr_list)))
+
+
+#! 验证range_image数值范围
+def summarize_matrix_distribution(x, name="X"):
+    # x: np.ndarray or torch.Tensor
+    if torch.is_tensor(x):
+        x = x.detach().float().cpu().numpy()
+
+    arr = np.asarray(x).reshape(-1)
+
+    # 去掉 NaN / Inf（可选但推荐）
+    finite = np.isfinite(arr)
+    arr = arr[finite]
+    if arr.size == 0:
+        print(f"{name}: empty after removing non-finite values.")
+        return
+
+    # 基本统计
+    print(f"=== {name} basic stats ===")
+    print(f"count: {arr.size}")
+    print(f"min  : {arr.min():.6g}")
+    print(f"max  : {arr.max():.6g}")
+    print(f"mean : {arr.mean():.6g}")
+    print(f"std  : {arr.std():.6g}")
+
+    # 0~100% 每 10% 分位点
+    qs = np.arange(0, 101, 10)  # [0,10,...,100]
+    qvals = np.percentile(arr, qs)
+
+    print(f"\n=== {name} percentiles (every 10%) ===")
+    for q, v in zip(qs, qvals):
+        print(f"P{q:>3d}: {v:.6g}")
+
+    # 把数据按这些分位点切成 10 段，并统计每段占比
+    # 注意：分位点可能重复（比如大量相同值），这会让某些段为空或比例偏离10%
+    bins = qvals.copy()
+    # 为了让 digitize 更稳定，最后一个边界稍微抬高一点
+    bins[-1] = np.nextafter(bins[-1], np.inf)
+
+    idx = np.digitize(arr, bins[1:], right=True)  # 0~9 表示落在哪个decile
+    counts = np.bincount(idx, minlength=10)
+    ratios = counts / arr.size
+
+    print(f"\n=== {name} decile bins (by percentile cut) ===")
+    for i in range(10):
+        lo = qvals[i]
+        hi = qvals[i+1]
+        print(f"[P{i*10:>2d}, P{(i+1)*10:>3d}]  [{lo:.6g}, {hi:.6g}] : "
+              f"{counts[i]}  ({ratios[i]*100:.2f}%)")
+
+# 用法示例：
+# summarize_matrix_distribution(gt_depth, name="gt_depth")
+
+
+
+def evaluate_range_image_vae(gt_range_maps_list, sample_range_images_list, sample_gt_masks_list):
+    print('Evaluating Depth Metrics ...')
+    rmse_list, mae_list, medae_list = [], [], []
+    lpips_list, ssim_list, psnr_list = [], [], []
+    for gt_range_map, sample_range_image, sample_gt_mask in tqdm(zip(gt_range_maps_list, sample_range_images_list, sample_gt_masks_list), total=len(gt_range_maps_list)):
+        #! apply mask
+        gt_depth = (gt_range_map * (sample_gt_mask==1)).transpose(1, 2, 0)
+
+        pred_depth = (sample_range_image * (sample_gt_mask==1)).transpose(1, 2, 0)
 
         rmse, mae, medae, lpips_loss, ssim_loss, psnr_loss = compute_depth_metrics(
             gt_depth, pred_depth

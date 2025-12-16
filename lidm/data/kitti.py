@@ -15,6 +15,8 @@ import imageio
 import torch
 import h5py
 import torch.nn.functional as F
+import re
+
 # TODO add annotation categories and semantic categories
 CATEGORIES = ['ignore', 'car', 'bicycle', 'motorcycle', 'truck', 'other-vehicle', 'person', 'bicyclist', 'motorcyclist',
               'road', 'parking', 'sidewalk', 'other-ground', 'building', 'fence', 'vegetation', 'trunk', 'terrain',
@@ -38,6 +40,42 @@ CAM_KITTI360_TRAIN_SET = ['00', '04', '05', '06', '07', '08', '09', '10']  # cam
 SEM_KITTI_VAL_SET = KITTI_VAL_SET = ['08']
 CAM_KITTI360_VAL_SET = KITTI360_VAL_SET = ['03']
 colormap_ = 20
+
+#! 解析路径
+def parse_seq_timestep_from_path(data_path: str):
+    """
+    Return (seq, timestep) as strings (or None if not found).
+    - KITTI-360: .../2013_05_28_drive_00{seq}_sync/.../{timestep:010d}.bin
+    - SemanticKITTI: .../sequences/{seq}/velodyne/{timestep:06d}.bin
+    """
+    p = data_path.replace("\\", "/")
+
+    seq = None
+    timestep = None
+
+    # SemanticKITTI pattern: sequences/08/velodyne/000123.bin
+    m = re.search(r"/sequences/(\d{2})/velodyne/(\d+)\.bin$", p)
+    if m:
+        seq = m.group(1)
+        timestep = m.group(2)
+        return seq, timestep
+
+    # KITTI-360 pattern: 2013_05_28_drive_0008_sync/.../0000000123.bin
+    m = re.search(r"2013_05_28_drive_00(\d+)_sync/.*/(\d+)\.bin$", p)
+    if m:
+        seq = m.group(1)
+        timestep = m.group(2)
+        return seq, timestep
+
+    # fallback: last number in filename
+    base = os.path.basename(p)
+    m = re.search(r"(\d+)\.bin$", base)
+    if m:
+        timestep = m.group(1)
+
+    return seq, timestep
+
+
 
 class KITTIBase(DatasetBase):
     def __init__(self, **kwargs):
@@ -105,6 +143,11 @@ class KITTIBase(DatasetBase):
         if self.condition_key == 'camera':
             cameras = self.load_camera(data_path)
             example[self.condition_key] = cameras
+
+        seq, timestep = parse_seq_timestep_from_path(data_path)
+        example["seq"] = seq
+        example["timestep"] = timestep
+        example["data_path"] = data_path 
 
         return example
 
@@ -337,11 +380,15 @@ class KITTIImageBase(KITTIBase):
     #Samples (Training): 98014, #Samples (Val): 3511
 
     """
-    def __init__(self, **kwargs):
+    def __init__(self, use_lidart_val = False, **kwargs):
+        self.use_lidart_val = use_lidart_val
         super().__init__(**kwargs)
         assert self.condition_key in [None, 'image']  # for image input only
 
     def prepare_data(self):
+        #! 只在 val 且开关打开时走 lidart_val
+        if self.split in ["val", "test"] and getattr(self, "use_lidart_val", False):
+            return self.prepare_data_lidart_val()
         # read data paths from KITTI-360
         self.data = []
         for seq_id in eval('KITTI360_%s_SET' % self.split.upper()):
@@ -352,6 +399,18 @@ class KITTIImageBase(KITTIBase):
         for seq_id in eval('KITTI_%s_SET' % self.split.upper()):
             self.data.extend(glob.glob(os.path.join(
                 self.data_root, f'SemanticKITTI/dataset/sequences/{seq_id}/velodyne/*.bin')))
+    
+    def prepare_data_lidart_val(self):
+        val_pkl = '/data0/code/LiDAR-Diffusion-main/difix_pkl/index_test_kitti.pkl'
+        list = pickle.load(open(val_pkl, 'rb'))
+        self.data = []
+        for item in list:
+            seq, scene_id, timestamp = item
+            timestamp = int(timestamp)
+            self.data.append(os.path.join(
+                self.data_root, f'KITTI-360/data_3d_raw/2013_05_28_drive_{seq}_sync/velodyne_points/data/{timestamp:010d}.bin'))
+
+
 
 
 class KITTIImageTrain(KITTIImageBase):

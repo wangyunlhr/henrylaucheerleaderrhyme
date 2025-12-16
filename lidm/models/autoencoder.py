@@ -263,6 +263,7 @@ class VQModel(pl.LightningModule):
             xrec[mask] = -1.
         log["inputs"] = x
         log["reconstructions"] = xrec
+        log['mask'] = self.get_input(batch, 'mask')
         if plot_ema:
             with self.ema_scope():
                 xrec_ema, _ = self(x)
