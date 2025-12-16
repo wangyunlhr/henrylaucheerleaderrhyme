@@ -24,6 +24,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 from torch.utils.data import Subset
 import open3d as o3d
+from sample_cond_difix_vaetrain import H5DataModule
 
 try:
     import open3d as o3d
@@ -99,8 +100,8 @@ def run(model, dataloader, imglogdir, pcdlogdir, nplog=None, config=None, verbos
     all_range_images, all_gt_ranges, all_gt_masks = [], [], []
     print(f"Running conditional sampling")
     for batch in tqdm(dataloader, desc="Reconstructing Batches"):
-        all_gt.extend(batch['reproj']) #这个是rangeimage对应的点云
-        N = len(batch['reproj'])
+        # all_gt.extend(batch['reproj']) #这个是rangeimage对应的点云
+        N = len(batch['image'])
         logs = model.log_images(batch)
         n_saved = save_logs(batch,logs, imglogdir, pcdlogdir, N, n_saved=n_saved, config=config)
         all_samples.extend([custom_to_pcd(img, config)[0].astype(np.float32) for img in logs["reconstructions"]])
@@ -319,12 +320,28 @@ if __name__ == "__main__":
                                       'aug_config': config['data']['params']['aug'], 'return_pcd': True})
         #! 添加使用lidarrt的kittival
         data_config['params'].update({'use_lidart_val': True})
+        
+        # dataset = instantiate_from_config(data_config)
+        # # dataset = Subset(dataset, list(range(min(64, len(dataset))))) #! debug only
+        # dataloader = DataLoader(dataset, batch_size=opt.batch_size, num_workers=8, shuffle=False, drop_last=False,
+        #                         collate_fn=test_collate_fn)
+        #!!! NEW Dataloader
+        pkl_directory = config.data.params.pkl_directory
+        dataset_path = config.data.params.dataset_path
+        num_workers = getattr(config.data.params, "num_workers", 8)
 
-        dataset = instantiate_from_config(data_config)
-        # dataset = Subset(dataset, list(range(min(64, len(dataset))))) #! debug only
-        dataloader = DataLoader(dataset, batch_size=opt.batch_size, num_workers=8, shuffle=False, drop_last=False,
-                                collate_fn=test_collate_fn)
-
+        # 假设model 里有 tokenizer（类似 net_difix.tokenizer）
+        tokenizer = getattr(model, "tokenizer", None)
+        data = H5DataModule(
+            pkl_directory=pkl_directory,
+            data_path=dataset_path,
+            tokenizer=tokenizer,
+            batch_size=opt.batch_size,
+            num_workers=num_workers
+        )
+        data.setup()
+        dataset = data.val_dataset
+        dataloader = data.val_dataloader()
         # settings
         all_samples, all_gt, all_range_images, all_gt_ranges, all_gt_masks = run(model, dataloader, imglogdir, pcdlogdir, nplog=numpylogdir,
                                   config=config, verbose=opt.verbose)
