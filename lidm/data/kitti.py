@@ -1023,6 +1023,7 @@ class HDF5Dataset_kitti(torch.utils.data.Dataset):
             "image": output_t_resize[:1], #label resize之后
             "image_ori": output_t[:1], #label原始大小
             "mask_ori": output_t[2:3], #原始mask大小
+            "mask": output_t[2:3], #原始mask大小
             "segmentation": img_t[:1], #累积之后的rangeimage作为condition
             "caption": caption,
             # 'ir': ir, 
