@@ -24,6 +24,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 from torch.utils.data import Subset
 import open3d as o3d
+from collections import OrderedDict
 
 try:
     import open3d as o3d
@@ -199,10 +200,41 @@ def get_parser():
     )
     return parser
 
+def maybe_remap_prefix(sd, model, prefix="first_stage_model."):
+    model_keys = set(model.state_dict().keys())
+    sd_keys = set(sd.keys())
+
+    # 如果 model 里没有前缀，但 sd 有前缀 → 去掉前缀
+    if any(k.startswith(prefix) for k in sd_keys) and not any(k.startswith(prefix) for k in model_keys):
+        sd = { (k[len(prefix):] if k.startswith(prefix) else k): v
+               for k, v in sd.items() if k.startswith(prefix) }
+        return sd
+
+    # 如果 model 里有前缀，但 sd 没有 → 加前缀
+    if any(k.startswith(prefix) for k in model_keys) and not any(k.startswith(prefix) for k in sd_keys):
+        sd = { prefix + k: v for k, v in sd.items() }
+        return sd
+
+    return sd
+
 
 def load_model_from_config(config, sd):
     model = instantiate_from_config(config)
-    model.load_state_dict(sd, strict=False)
+    # model.load_state_dict(sd, strict=True)
+    sd2 = maybe_remap_prefix(sd, model, "first_stage_model.")
+    missing, unexpected = model.load_state_dict(sd2, strict=False)
+    print(f"[load_state_dict] missing={len(missing)}, unexpected={len(unexpected)}")
+    # for k in model.state_dict().keys():
+    #     print(k)
+    # for sd_k in sd.keys():
+    #     print(sd_k)
+    # print(f"==============[load_state_dict] missing ({len(missing)}):")
+    # for k in missing:
+    #     print("  MISSING:", k)
+
+    # print(f"**************[load_state_dict] unexpected ({len(unexpected)}):")
+    # for k in unexpected:
+    #     print("  UNEXPECTED:", k)
     model.cuda()
     model.eval()
     return model
@@ -272,7 +304,8 @@ if __name__ == "__main__":
         logdir = opt.resume.rstrip("/")
         ckpt = os.path.join(logdir, "model.ckpt")
 
-    base_configs = [f'{logdir}/config.yaml'] #!修改成对应的 LiDAR-Diffusion-main/models/first_stage_models/kitti/f_c2_p4/autoencoder_c2_p4.yaml
+    # base_configs = [f'{logdir}/config.yaml'] #!修改成对应的 LiDAR-Diffusion-main/models/first_stage_models/kitti/f_c2_p4/autoencoder_c2_p4.yaml
+    base_configs = ["/data0/code/LiDAR-Diffusion-main/models/first_stage_models/kitti/f_c2_p4_wo_logscale/config.yaml"]
     opt.base = base_configs
 
     configs = [OmegaConf.load(cfg) for cfg in opt.base]
