@@ -899,13 +899,16 @@ class LatentDiffusion(DDPM):
                               force_c_encode=True,
                               return_original_cond=True,
                               return_xcrec = True,)
-        loss = self(z, c, x_ori_gt = x, x_ori_rec=xrec, x_cond_gt=xc, x_cond_rec=xcrec)
-
+        loss = self(c, c, x_ori_gt = x, x_ori_rec=xrec, x_cond_gt=xc, x_cond_rec=xcrec)
+        #! 将输入换成了condition处理
 
         return loss
 
     def forward(self, x, c, x_ori_gt, x_ori_rec, x_cond_gt, x_cond_rec, *args, **kwargs):
-        t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        # t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
+        #! 修改成固定
+        FIX_T = 200
+        t = torch.full((x.shape[0],), FIX_T, device=self.device, dtype=torch.long)
         # if self.model.conditioning_key is not None: #! condition 进行vae处理
         #     assert c is not None
         #     if self.cond_stage_trainable:
@@ -1049,8 +1052,9 @@ class LatentDiffusion(DDPM):
 
     def p_losses(self, x_start, cond, t, x_ori_gt = None, x_ori_rec=None, 
                              x_cond_gt=None, x_cond_rec=None, noise=None):
-        noise = default(noise, lambda: torch.randn_like(x_start))
-        x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        # noise = default(noise, lambda: torch.randn_like(x_start))
+        # x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
+        x_noisy = x_start
         model_output = self.apply_model(x_noisy, t, cond)
 
         loss_dict = {}
@@ -1063,12 +1067,12 @@ class LatentDiffusion(DDPM):
         else:
             raise NotImplementedError()
 
-        # simple loss
-        loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
-        loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
+        # simple loss 去掉noise loss
+        # loss_simple = self.get_loss(model_output, target, mean=False).mean([1, 2, 3])
+        # loss_dict.update({f'{prefix}/loss_simple': loss_simple.mean()})
 
         logvar_t = self.logvar[t].to(self.device)
-        loss = loss_simple / torch.exp(logvar_t) + logvar_t
+        loss = logvar_t
         # loss = loss_simple / torch.exp(self.logvar) + self.logvar
         if self.learn_logvar:
             loss_dict.update({f'{prefix}/loss_gamma': loss.mean()})
@@ -1077,12 +1081,12 @@ class LatentDiffusion(DDPM):
         loss = self.l_simple_weight * loss.mean()
 
         # vlb loss
-        loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
-        loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
-        loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
+        # loss_vlb = self.get_loss(model_output, target, mean=False).mean(dim=(1, 2, 3))
+        # loss_vlb = (self.lvlb_weights[t] * loss_vlb).mean()
+        # loss_dict.update({f'{prefix}/loss_vlb': loss_vlb})
 
-        # total loss
-        loss += (self.original_elbo_weight * loss_vlb)
+        # # total loss
+        # loss += (self.original_elbo_weight * loss_vlb)
 
         # === 2) 新增：从 eps 得到 x0_hat ===
         if self.parameterization == "eps":
@@ -1094,11 +1098,11 @@ class LatentDiffusion(DDPM):
             x_rec = self.differentiable_decode_first_stage(x0_hat) #!
             sample_rec_loss = torch.nn.functional.l1_loss(x_rec, x_ori_gt)
             input_rec_loss = torch.nn.functional.l1_loss(x_ori_rec, x_ori_gt)
-            condtion_rec_loss = torch.nn.functional.l1_loss(x_cond_rec, x_cond_gt)
+            # condtion_rec_loss = torch.nn.functional.l1_loss(x_cond_rec, x_cond_gt)
             loss_dict[f'{prefix}/sample_rec_loss'] = sample_rec_loss
             loss_dict[f'{prefix}/input_rec_loss'] = input_rec_loss
-            loss_dict[f'{prefix}/condtion_rec_loss'] = condtion_rec_loss
-            loss = loss + 0.01 * sample_rec_loss + 0.1 * input_rec_loss + 0.1 * condtion_rec_loss
+            # loss_dict[f'{prefix}/condtion_rec_loss'] = condtion_rec_loss #!因为condition的模式不太一样，先去除
+            loss = loss + 0.01 * sample_rec_loss + 0.1 * input_rec_loss #+ 0.1 * condtion_rec_loss
 
 
         loss_dict.update({f'{prefix}/loss': loss})
@@ -1293,12 +1297,22 @@ class LatentDiffusion(DDPM):
                                   mask=mask, x0=x0)
 
     @torch.no_grad()
-    def sample_log(self, cond, batch_size, ddim, ddim_steps, **kwargs):
+    def sample_log(self, cond, batch_size, ddim, ddim_steps, input = None, **kwargs):
         if ddim:
             ddim_sampler = DDIMSampler(self)
             shape = (self.channels, *self.image_size)
-            samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size,
-                                                         shape, cond, verbose=self.verbose, **kwargs)
+            if input is None:
+                samples, intermediates = ddim_sampler.sample(ddim_steps, batch_size,
+                                                            shape, cond, verbose=self.verbose, **kwargs)
+            else:
+                samples, intermediates = ddim_sampler.sample(
+                                                            ddim_steps, batch_size, shape, cond,
+                                                            x_T=input,       # 关键：用你给的 x_t 作为起点
+                                                            start_t=200,      # 关键：从 t=200 开始
+                                                            verbose=self.verbose,
+                                                            **kwargs
+                                                            )
+            
 
         else:
             samples, intermediates = self.sample(cond=cond, batch_size=batch_size,
@@ -1375,7 +1389,7 @@ class LatentDiffusion(DDPM):
             # get denoise row
             with self.ema_scope("Plotting"):
                 samples, z_denoise_row = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,
-                                                         ddim_steps=ddim_steps, eta=ddim_eta)
+                                                         ddim_steps=ddim_steps, eta=ddim_eta, input = c) #!不是从纯噪声开始
             x_samples = self.decode_first_stage(samples)
             log["samples"] = x_samples
             if plot_denoise_rows:
