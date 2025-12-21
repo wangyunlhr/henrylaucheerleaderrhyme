@@ -651,7 +651,7 @@ class LatentDiffusion(DDPM):
 
         return fold, unfold, normalization, weighting
 
-    @torch.no_grad()
+    # @torch.no_grad() #! 
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, return_xcrec=False, bs=None):
         # ground truth
@@ -877,11 +877,16 @@ class LatentDiffusion(DDPM):
             return self.first_stage_model.encode(x)
 
     def shared_step(self, batch, **kwargs):
-        x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c)
+        z, c, x, xrec, xc, xcrec = self.get_input(batch, 
+                              self.first_stage_key,
+                              return_first_stage_outputs=True,
+                              force_c_encode=True,
+                              return_original_cond=True,
+                              return_xcrec = True,)
+        loss = self(z, c, x_ori_gt = x, x_ori_rec=xrec, x_cond_gt=xc, x_cond_rec=xcrec)
         return loss
 
-    def forward(self, x, c, *args, **kwargs):
+    def forward(self, x, c, x_ori_gt, x_ori_rec, x_cond_gt, x_cond_rec, *args, **kwargs):
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         # if self.model.conditioning_key is not None: #! condition 进行vae处理
         #     assert c is not None
@@ -890,7 +895,10 @@ class LatentDiffusion(DDPM):
         #     if self.shorten_cond_schedule:  # TODO: drop this option
         #         tc = self.cond_ids[t].to(self.device)
         #         c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
-        return self.p_losses(x, c, t, *args, **kwargs)
+        return self.p_losses(x, c, t, x_ori_gt = x_ori_gt, x_ori_rec=x_ori_rec, 
+                             x_cond_gt=x_cond_gt, x_cond_rec=x_cond_rec,
+                             *args, **kwargs)
+
 
     def _rescale_annotations(self, bboxes, crop_coordinates):  # TODO: move to dataset
         def rescale_bbox(bbox):
@@ -1022,7 +1030,8 @@ class LatentDiffusion(DDPM):
         kl_prior = normal_kl(mean1=qt_mean, logvar1=qt_log_variance, mean2=0.0, logvar2=0.0)
         return mean_flat(kl_prior) / np.log(2.0)
 
-    def p_losses(self, x_start, cond, t, noise=None):
+    def p_losses(self, x_start, cond, t, x_ori_gt = None, x_ori_rec=None, 
+                             x_cond_gt=None, x_cond_rec=None, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_output = self.apply_model(x_noisy, t, cond)
@@ -1057,6 +1066,26 @@ class LatentDiffusion(DDPM):
 
         # total loss
         loss += (self.original_elbo_weight * loss_vlb)
+
+
+        # === 2) 新增：从 eps 得到 x0_hat ===
+        if self.parameterization == "eps":
+            x0_hat = self.predict_start_from_noise(x_noisy, t=t, noise=model_output)
+        else:
+            x0_hat = model_output
+
+        if x_ori_gt is not None:
+            x_rec = self.differentiable_decode_first_stage(x0_hat) #!
+            sample_rec_loss = torch.nn.functional.l1_loss(x_rec, x_ori_gt)
+            # input_rec_loss = torch.nn.functional.l1_loss(x_ori_rec, x_ori_gt)
+            # condtion_rec_loss = torch.nn.functional.l1_loss(x_cond_rec, x_cond_gt)
+            loss_dict[f'{prefix}/sample_rec_loss'] = sample_rec_loss
+            # loss_dict[f'{prefix}/input_rec_loss'] = input_rec_loss
+            # loss_dict[f'{prefix}/condtion_rec_loss'] = condtion_rec_loss
+            loss = loss + 0.01 * sample_rec_loss #+ 0.1 * input_rec_loss + 0.1 * condtion_rec_loss
+
+
+
         loss_dict.update({f'{prefix}/loss': loss})
 
         return loss, loss_dict
