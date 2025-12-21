@@ -474,9 +474,14 @@ class LatentDiffusion(DDPM):
         ids = torch.round(torch.linspace(0, self.num_timesteps - 1, self.num_timesteps_cond)).long()
         self.cond_ids[:self.num_timesteps_cond] = ids
 
-    @rank_zero_only
+    # @rank_zero_only
     @torch.no_grad()
     def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
+        # self.first_stage_model.eval() #!
+        # # decoder 再 train
+        # self.first_stage_model.decoder.train()
+        # if hasattr(self.first_stage_model, "post_quant_conv"):
+        #     self.first_stage_model.post_quant_conv.train()
         # only for very first batch
         if self.scale_by_std and self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:
             assert self.scale_factor == 1., 'rather not use custom rescaling and std-rescaling simultaneously'
@@ -504,8 +509,19 @@ class LatentDiffusion(DDPM):
         model = instantiate_from_config(config)
         self.first_stage_model = model.eval()
         self.first_stage_model.train = disabled_train
-        for param in self.first_stage_model.parameters():
-            param.requires_grad = False
+        #! 打开decoder, post_quant_conv
+        # self.first_stage_model.decoder.train()
+        #! 冻结所有，然后打开decoder的
+        for p in self.first_stage_model.parameters():
+            p.requires_grad = False
+
+        for p in self.first_stage_model.decoder.parameters():
+            p.requires_grad = True
+        if hasattr(self.first_stage_model, "post_quant_conv"):
+            # self.first_stage_model.post_quant_conv.train()
+            for p in self.first_stage_model.post_quant_conv.parameters():
+                p.requires_grad = True
+
 
     def instantiate_cond_stage(self, config):
         if not self.cond_stage_trainable:
@@ -651,7 +667,7 @@ class LatentDiffusion(DDPM):
 
         return fold, unfold, normalization, weighting
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def get_input(self, batch, k, return_first_stage_outputs=False, force_c_encode=False,
                   cond_key=None, return_original_cond=False, return_xcrec=False, bs=None):
         # ground truth
@@ -709,12 +725,12 @@ class LatentDiffusion(DDPM):
         c = self.get_first_stage_encoding(encoder_xc).detach()
         out = [z, c]
         if return_first_stage_outputs:
-            xrec = self.decode_first_stage(z)
+            xrec = self.differentiable_decode_first_stage(z)
             out.extend([x, xrec])
         if return_original_cond:
             out.append(xc)
         if return_xcrec:
-            xcrec = self.decode_first_stage(c)
+            xcrec = self.differentiable_decode_first_stage(c)
             out.append(xcrec)
         #! 额外返回 condition经过vae编码再解码的结果
         return out
@@ -875,13 +891,20 @@ class LatentDiffusion(DDPM):
                 return self.first_stage_model.encode(x)
         else:
             return self.first_stage_model.encode(x)
-
+    #! train_step
     def shared_step(self, batch, **kwargs):
-        x, c = self.get_input(batch, self.first_stage_key)
-        loss = self(x, c)
+        z, c, x, xrec, xc, xcrec = self.get_input(batch, 
+                              self.first_stage_key,
+                              return_first_stage_outputs=True,
+                              force_c_encode=True,
+                              return_original_cond=True,
+                              return_xcrec = True,)
+        loss = self(z, c, x_ori_gt = x, x_ori_rec=xrec, x_cond_gt=xc, x_cond_rec=xcrec)
+
+
         return loss
 
-    def forward(self, x, c, *args, **kwargs):
+    def forward(self, x, c, x_ori_gt, x_ori_rec, x_cond_gt, x_cond_rec, *args, **kwargs):
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device).long()
         # if self.model.conditioning_key is not None: #! condition 进行vae处理
         #     assert c is not None
@@ -890,7 +913,9 @@ class LatentDiffusion(DDPM):
         #     if self.shorten_cond_schedule:  # TODO: drop this option
         #         tc = self.cond_ids[t].to(self.device)
         #         c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
-        return self.p_losses(x, c, t, *args, **kwargs)
+        return self.p_losses(x, c, t, x_ori_gt = x_ori_gt, x_ori_rec=x_ori_rec, 
+                             x_cond_gt=x_cond_gt, x_cond_rec=x_cond_rec,
+                             *args, **kwargs)
 
     def _rescale_annotations(self, bboxes, crop_coordinates):  # TODO: move to dataset
         def rescale_bbox(bbox):
@@ -1022,7 +1047,8 @@ class LatentDiffusion(DDPM):
         kl_prior = normal_kl(mean1=qt_mean, logvar1=qt_log_variance, mean2=0.0, logvar2=0.0)
         return mean_flat(kl_prior) / np.log(2.0)
 
-    def p_losses(self, x_start, cond, t, noise=None):
+    def p_losses(self, x_start, cond, t, x_ori_gt = None, x_ori_rec=None, 
+                             x_cond_gt=None, x_cond_rec=None, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_output = self.apply_model(x_noisy, t, cond)
@@ -1057,6 +1083,24 @@ class LatentDiffusion(DDPM):
 
         # total loss
         loss += (self.original_elbo_weight * loss_vlb)
+
+        # === 2) 新增：从 eps 得到 x0_hat ===
+        if self.parameterization == "eps":
+            x0_hat = self.predict_start_from_noise(x_noisy, t=t, noise=model_output)
+        else:
+            x0_hat = model_output
+
+        if x_ori_gt is not None:
+            x_rec = self.differentiable_decode_first_stage(x0_hat) #!
+            sample_rec_loss = torch.nn.functional.l1_loss(x_rec, x_ori_gt)
+            input_rec_loss = torch.nn.functional.l1_loss(x_ori_rec, x_ori_gt)
+            condtion_rec_loss = torch.nn.functional.l1_loss(x_cond_rec, x_cond_gt)
+            loss_dict[f'{prefix}/sample_rec_loss'] = sample_rec_loss
+            loss_dict[f'{prefix}/input_rec_loss'] = input_rec_loss
+            loss_dict[f'{prefix}/condtion_rec_loss'] = condtion_rec_loss
+            loss = loss + 0.05 * sample_rec_loss + 0.1 * input_rec_loss + 0.1 * condtion_rec_loss
+
+
         loss_dict.update({f'{prefix}/loss': loss})
 
         return loss, loss_dict
@@ -1385,13 +1429,21 @@ class LatentDiffusion(DDPM):
     def configure_optimizers(self):
         lr = self.learning_rate
         params = list(self.model.parameters())
-        if self.cond_stage_trainable:
-            self.print_fn(f"{self.__class__.__name__}: Also optimizing conditioner params!")
-            params = params + list(self.cond_stage_model.parameters())
+        vae_dec_params = [p for p in self.first_stage_model.parameters() if p.requires_grad]
+        # if self.cond_stage_trainable:
+        #     self.print_fn(f"{self.__class__.__name__}: Also optimizing conditioner params!")
+        #     params = params + list(self.cond_stage_model.parameters())
         if self.learn_logvar:
             self.print_fn('Diffusion model optimizing logvar')
             params.append(self.logvar)
-        opt = torch.optim.AdamW(params, lr=lr)
+        # opt = torch.optim.AdamW(params, lr=lr)
+        opt = torch.optim.AdamW(
+        [
+            {"params": params, "lr": lr},
+            {"params": vae_dec_params, "lr": lr * 0.1}, 
+        ],
+        weight_decay=0.0,  # VAE decoder 通常 wd 小一些更稳
+    )
         if self.use_scheduler:
             assert 'target' in self.scheduler_config
             scheduler = instantiate_from_config(self.scheduler_config)
